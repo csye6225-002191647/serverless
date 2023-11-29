@@ -33,11 +33,13 @@ const storage = new Storage({
 
 export const handler = async (event) => {
     let userEmail;
+    let emailStatus;
     try {
         const snsMessage = JSON.parse(event.Records[0].Sns.Message);
         const url = snsMessage.url;
         userEmail = snsMessage.email;
         const assignment_name = snsMessage.assignment
+        const version = snsMessage.version
 
         console.log(`Downloading release from GitHub: ${url}`);
 
@@ -46,9 +48,15 @@ export const handler = async (event) => {
         console.log('response', response)
         // Upload to Google Cloud Storage using Blob
         const bucketName = process.env.GCP_BUCKET_NAME;
-        const destinationFileName = `${userEmail}_${assignment_name}`;
+        const destinationFileName = `${userEmail}_${assignment_name}_${version}`;
         const bucket = storage.bucket(bucketName);
         const blob = bucket.file(destinationFileName);
+
+        const options = {
+          version: 'v4', // Specify the signed URL version
+          action: 'read', // Specify the action (read, write, delete, etc.)
+          expires: Date.now() + 5 * 60 * 1000, // URL expiration time (15 minutes from now)
+        };
 
         await new Promise((resolve, reject) => {
             const blobStream = blob.createWriteStream({
@@ -57,20 +65,19 @@ export const handler = async (event) => {
             });
 
             blobStream.on('error', async (error) => {
-                console.error('Error uploading to GCS:', error);
-                 // Send email notification for failure
-                await sendEmailNotification(userEmail, 'failure');
-
-                // Track email status in DynamoDB for failure
-                await trackEmailStatus('failure', userEmail);
-                reject(error);
+              console.error('Error uploading to GCS:', error);
+               // Send email notification for failure
+              await sendEmailNotification(userEmail, 'failure', error.message);
+              // Track email status in DynamoDB for failure
+              await trackEmailStatus('failure', userEmail);
+              reject(error);
             });
 
             blobStream.on('finish', async () => {
                 console.log(`File uploaded to ${bucketName}/${destinationFileName}`);
                 // Send email notification
-                const message = `Successfully uploaded`
-                const emailStatus = await sendEmailNotification(userEmail, 'success', message);
+                const message = `Successfully uploaded - ${bucketName}/${destinationFileName}`
+                emailStatus = await sendEmailNotification(userEmail, 'success', message);
                 console.log(`Email notification sent with status: ${emailStatus}`);
                 // Track email status in DynamoDB
                 await trackEmailStatus('success', userEmail);
@@ -100,10 +107,13 @@ export const handler = async (event) => {
 async function sendEmailNotification(userEmail, status, message) {
 
     const data = {
-        from: 'mailgun@rohitchouhan.me', 
+        from: `no-reply@${process.env.MAILGUN_DOMAIN_NAME}`, 
         to: userEmail,
         subject: `Download Status - ${status}`,
-        text: `The download process has ${status === 'success' ? 'succeeded' : 'failed'}.\n${message}`
+        html: `<p>The download process has ${status === 'success' ? 'succeeded' : 'failed'}.\n${message}</p>`,
+        headers: {
+            'X-MSMail-Priority': 'High',
+        },
     };
 
     return new Promise((resolve, reject) => {
