@@ -35,6 +35,7 @@ export const handler = async (event) => {
     let userEmail;
     let emailStatus;
     try {
+
         const snsMessage = JSON.parse(event.Records[0].Sns.Message);
         const url = snsMessage.url;
         userEmail = snsMessage.email;
@@ -48,7 +49,7 @@ export const handler = async (event) => {
         console.log('response', response)
         // Upload to Google Cloud Storage using Blob
         const bucketName = process.env.GCP_BUCKET_NAME;
-        const destinationFileName = `${userEmail}_${assignment_name}_${version}`;
+        const destinationFileName = `${assignment_name}/${userEmail}/${version}`;
         const bucket = storage.bucket(bucketName);
         const blob = bucket.file(destinationFileName);
 
@@ -69,7 +70,7 @@ export const handler = async (event) => {
                // Send email notification for failure
               await sendEmailNotification(userEmail, 'failure', error.message);
               // Track email status in DynamoDB for failure
-              await trackEmailStatus('failure', userEmail);
+              await trackEmailStatus('success', userEmail);
               reject(error);
             });
 
@@ -99,7 +100,7 @@ export const handler = async (event) => {
         await sendEmailNotification(userEmail, 'failure', message);
         console.log(`Email notification sent with status: ${emailStatus}`);
         // Track email status in DynamoDB for failure
-        await trackEmailStatus('failure', userEmail);
+        await trackEmailStatus('success', userEmail);
         console.log(`Email tracked: ${emailStatus}`);
     }
 };
@@ -110,7 +111,35 @@ async function sendEmailNotification(userEmail, status, message) {
         from: `no-reply@${process.env.MAILGUN_DOMAIN_NAME}`, 
         to: userEmail,
         subject: `Download Status - ${status}`,
-        html: `<p>The download process has ${status === 'success' ? 'succeeded' : 'failed'}.\n${message}</p>`,
+        html:  `<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Email Notification</title>
+        </head>
+        <body>
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto;">
+                <p>Hi ${userEmail.split('@')[0]},</p>
+                
+                <p>We hope this message finds you well.</p>
+        
+                <p>Here is the latest update on your recent submission:</p>
+        
+                <p>The download process has ${status === 'success' ? 'succeeded' : 'failed'}.</p>
+        
+                <p>${message}</p>
+        
+                <p>We appreciate your participation and dedication. If you have any questions or need further assistance, feel free to reach out.</p>
+        
+                <p>Thank you for your submission!</p>
+        
+                <p>Best regards,</p>
+                <p>Rohit</p>
+            </div>
+        </body>
+        </html>
+        `,
         headers: {
             'X-MSMail-Priority': 'High',
         },
@@ -120,6 +149,8 @@ async function sendEmailNotification(userEmail, status, message) {
         mg.messages().send(data, (error, body) => {
             if (error) {
                 console.error('Error sending email:', error);
+                trackEmailStatus('failure', userEmail);
+                console.log(`Email tracked: ${emailStatus}`);
                 reject(error);
             } else {
                 console.log('Email sent:', body);
@@ -130,18 +161,52 @@ async function sendEmailNotification(userEmail, status, message) {
 }
 
 async function trackEmailStatus(status, userEmail) {
+       // Get the Mailgun bounce list
+    const bounceList = await getBounceList();
+    console.log('Mailgun Bounce List:', bounceList);
+    let isBounce = false;
+    if (bounceList.includes(userEmail)) {
+        console.log(`User ${userEmail} is in the bounce list. Recording failure status in DynamoDB.`);
+        isBounce = true
+        // Record failure status in DynamoDB
+        // await trackEmailStatus('failure', userEmail);
+        console.log(`Email tracked with failure status.`);
+    }
+
     const params = {
         TableName: process.env.DYNAMODB_TABLE_NAME,
         Item: {
             messageId: generateUniqueId(),
             recipient: userEmail,
             sentAt: new Date().toISOString(),
-            status,
+            status: isBounce? 'failure': status,
         },
     };
+    
     await dynamoDB.put(params).promise();
 }
 
 function generateUniqueId() {
     return uuidv4();
+}
+
+// Function to get the Mailgun bounce list
+async function getBounceList() {
+    try {
+        const domain = process.env.MAILGUN_DOMAIN_NAME;
+        const apiKey = process.env.MAILGUN_API_KEY;
+        const apiUrl = `https://api.mailgun.net/v3/${domain}/bounces`;
+
+        const response = await axios.get(apiUrl, {
+            auth: {
+                username: 'api',
+                password: apiKey,
+            },
+        });
+
+        return response.data.items.map((item) => item.address); // Extract and return the list of bounced email addresses
+    } catch (error) {
+        console.error('Error fetching bounce list:', error);
+        throw error;
+    }
 }
